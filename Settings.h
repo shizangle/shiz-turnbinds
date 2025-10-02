@@ -15,6 +15,7 @@ struct SimulationSettings {
     int modifierKey = 0x12; // VK_MENU (Alt)
     int windowX = -1; // -1 means unset (center window)
     int windowY = -1;
+    int autoActivateToggleKey = 0x74; // F5 by default
 };
 
 class SettingsManager {

@@ -27,6 +27,7 @@ void SettingsManager::load() {
         settings_.modifierKey = j.value("modifierKey", settings_.modifierKey);
         settings_.windowX = j.value("windowX", settings_.windowX);
         settings_.windowY = j.value("windowY", settings_.windowY);
+        settings_.autoActivateToggleKey = j.value("autoActivateToggleKey", settings_.autoActivateToggleKey);
     }
     catch (const std::exception& e) {
         std::cerr << "Failed to parse " << configFile_ << ": " << e.what() << "\n";
@@ -47,6 +48,7 @@ void SettingsManager::save() const {
     j["modifierKey"] = settings_.modifierKey;
     j["windowX"] = settings_.windowX;
     j["windowY"] = settings_.windowY;
+    j["autoActivateToggleKey"] = settings_.autoActivateToggleKey;
 
     std::ofstream file(configFile_);
     if (file.is_open()) {

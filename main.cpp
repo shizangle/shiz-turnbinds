@@ -1,4 +1,4 @@
-﻿#include "ConsoleUI.h"
+#include "ConsoleUI.h"
 #include "Settings.h"
 #include "MouseSimulation.h"
 #include "CS2Monitor.h"
@@ -67,6 +67,7 @@ int main() {
     auto lastCS2Check = std::chrono::steady_clock::now();
     bool lastLeftDown = false;
     bool lastRightDown = false;
+    bool lastAutoToggleKeyDown = false; // For debounce
 
     ui.updateSettingsDisplay(selectedOption, settings.get());
     ui.updateStatusDisplay(running);
@@ -80,8 +81,8 @@ int main() {
 
             if (ch == 224) {
                 ch = _getch();
-                if (ch == 72) selectedOption = (selectedOption - 1 + 8) % 8;
-                else if (ch == 80) selectedOption = (selectedOption + 1) % 8;
+                if (ch == 72) selectedOption = (selectedOption - 1 + 9) % 9; // 9 options now
+                else if (ch == 80) selectedOption = (selectedOption + 1) % 9;
                 else if (ch == 75 || ch == 77) {
                     float delta = (ch == 75 ? -1 : 1);
                     settings.update([&](SimulationSettings& s) {
@@ -132,6 +133,14 @@ int main() {
                         });
                     settingsChanged = true;
                 }
+                else if (selectedOption == 8) { // auto-activate toggle key
+                    int newKey = ui.detectKeyPress();
+                    settings.update([&](SimulationSettings& s) {
+                        s.autoActivateToggleKey = newKey;
+                        settingChangeMsg = "Auto-Activate Toggle Key to " + keyToString(newKey);
+                        });
+                    settingsChanged = true;
+                }
                 if (!settingChangeMsg.empty()) ui.updateDebugDisplay(settingChangeMsg);
             }
             else if (ch == 'q' || ch == 'Q') {
@@ -144,12 +153,27 @@ int main() {
             ui.updateSettingsDisplay(selectedOption, settings.get());
         }
 
+        // --- auto-activate toggle key handling ---
+        auto cfg = settings.get();
+        SHORT keyState = GetAsyncKeyState(cfg.autoActivateToggleKey);
+        bool autoToggleKeyDown = (keyState & 0x8000) != 0;
+        if (autoToggleKeyDown && !lastAutoToggleKeyDown) {
+            bool willBe = !cfg.autoActivate;
+            settings.update([&](SimulationSettings& s) {
+                s.autoActivate = willBe;
+                });
+            settings.save();
+            ui.updateDebugDisplay(std::string("Auto-Activate toggled ") + (willBe ? "On" : "Off"));
+            ui.updateSettingsDisplay(selectedOption, settings.get());
+        }
+        lastAutoToggleKeyDown = autoToggleKeyDown;
+        // -----------------------------------------
+
         if (lastRunning != running) {
             ui.updateStatusDisplay(running);
             lastRunning = running;
         }
 
-        auto cfg = settings.get();
         bool leftDown = (GetAsyncKeyState(cfg.leftKey) & 0x8000) != 0;
         bool rightDown = (GetAsyncKeyState(cfg.rightKey) & 0x8000) != 0;
         if (leftDown != lastLeftDown || rightDown != lastRightDown) {

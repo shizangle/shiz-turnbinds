@@ -78,8 +78,8 @@ void ConsoleUI::writeAt(COORD pos, const std::string& text, bool clearLine) {
 }
 
 void ConsoleUI::updateSettingsDisplay(int selectedOption, const SimulationSettings& settings) {
-const char* options[] = { "auto-activate", "update rate (hz)", "m_yaw", "cl_yawspeed", "+left key", "+right key", "modifier key", "modifier" };
-    for (int i = 0; i < 8; ++i) {
+    const char* options[] = { "auto-activate", "update rate (hz)", "m_yaw", "cl_yawspeed", "+left key", "+right key", "modifier key", "modifier", "auto-activate toggle key" };
+    for (int i = 0; i < sizeof(options) / sizeof(options[0]); ++i) {
         COORD pos = { 0, static_cast<SHORT>(settingsStartPos_.Y + i) };
         std::string prefix = (i == selectedOption) ? "> " : "  ";
         std::string value;
@@ -122,6 +122,9 @@ const char* options[] = { "auto-activate", "update rate (hz)", "m_yaw", "cl_yaws
             std::ostringstream oss;
             oss << std::fixed << std::setprecision(2) << settings.modifier;
             value = oss.str();
+        }
+        else if (i == 8) { // auto-activate toggle key
+            value = keyToString(settings.autoActivateToggleKey);
         }
 
         if (i == selectedOption) {
