@@ -1,205 +1,171 @@
-﻿#include "FloatingUI.h"
-#include <windows.h>
-#include <sstream>
-#include <iomanip>
-#include <algorithm>
+#include "FloatingUI.h"
+#include "Utils.h"
+#include <windowsx.h>
+#include <cstdio>
 
-FloatingUI::FloatingUI(SettingsManager& settings)
-    : settings_(settings), hwnd_(nullptr), hFont_(nullptr),
-    isDragging_(false), isScrollActive_(false), isVisible_(true) {
-    RegisterWindowClass();
+namespace {
+constexpr int kWidth = 150;
+constexpr int kHeight = 46;
+constexpr UINT_PTR kTimerId = 1;
 }
 
-FloatingUI::~FloatingUI() {
-    if (hFont_) {
-        DeleteObject(hFont_);
-    }
-    if (hwnd_) {
-        UnregisterHotKey(hwnd_, 1);
-        DestroyWindow(hwnd_);
-    }
-}
-
-void FloatingUI::RegisterWindowClass() {
-    WNDCLASSEX wc = { 0 };
-    wc.cbSize = sizeof(WNDCLASSEX);
-    wc.style = CS_HREDRAW | CS_VREDRAW;
-    wc.lpfnWndProc = WndProc;
-    wc.hInstance = GetModuleHandle(nullptr);
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)GetStockObject(NULL_BRUSH);  // Make background transparent
-    wc.lpszClassName = L"FloatingMYawUI";
-    RegisterClassEx(&wc);
-}
-
-void FloatingUI::CreateFloatingWindow() {
-    hwnd_ = CreateWindowEx(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
-        L"FloatingMYawUI",
-        L"cl_yawspeed",
-        WS_POPUP | WS_VISIBLE | WS_BORDER,
-        CW_USEDEFAULT, CW_USEDEFAULT, 140, 30,
-        nullptr, nullptr, GetModuleHandle(nullptr), this
-    );
-
-    hFont_ = CreateFont(
-        16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, L"Arial"
-    );
-
-    // Set layered window transparency (200 out of 255)
-    SetLayeredWindowAttributes(hwnd_, 0, 200, LWA_ALPHA);
-
-    SimulationSettings settings = settings_.get();
-    int x, y;
-    if (settings.windowX == -1 || settings.windowY == -1) {
-        RECT rect;
-        GetWindowRect(hwnd_, &rect);
-        x = (GetSystemMetrics(SM_CXSCREEN) - (rect.right - rect.left)) / 2;
-        y = (GetSystemMetrics(SM_CYSCREEN) - (rect.bottom - rect.top)) / 2;
-    }
-    else {
-        x = settings.windowX;
-        y = settings.windowY;
-    }
-
-    SetWindowPos(hwnd_, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
-    ShowWindow(hwnd_, SW_SHOW);
-    UpdateWindow(hwnd_);
-
-    RegisterHotkey();
-}
-
-void FloatingUI::RegisterHotkey() {
-    RegisterHotKey(hwnd_, 1, MOD_CONTROL | MOD_SHIFT, 'M');
-}
-
-void FloatingUI::ToggleVisibility() {
-    isVisible_ = !isVisible_;
-    ShowWindow(hwnd_, isVisible_ ? SW_SHOW : SW_HIDE);
-}
+FloatingUI::FloatingUI(SettingsManager& settings, const std::atomic<bool>& paused)
+    : settings_(settings), paused_(paused) {}
 
 void FloatingUI::Show() {
-    CreateFloatingWindow();
+    HINSTANCE inst = GetModuleHandle(nullptr);
+    WNDCLASSA wc = {};
+    wc.lpfnWndProc = WndProc;
+    wc.hInstance = inst;
+    wc.hCursor = LoadCursor(nullptr, IDC_SIZEALL);
+    wc.lpszClassName = "ShizTurnbindsOverlay";
+    RegisterClassA(&wc);
+
+    auto cfg = settings_.get();
+    int x = cfg.windowX, y = cfg.windowY;
+    if (x < 0 || y < 0) {
+        x = (GetSystemMetrics(SM_CXSCREEN) - kWidth) / 2;
+        y = 40;
+    }
+
+    HWND hwnd = CreateWindowExA(
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
+        wc.lpszClassName, "Shiz-Turnbinds", WS_POPUP,
+        x, y, kWidth, kHeight, nullptr, nullptr, inst, this);
+    if (!hwnd) return;
+
+    hwnd_ = hwnd;
+    SetLayeredWindowAttributes(hwnd, 0, 225, LWA_ALPHA);
+    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    SetTimer(hwnd, kTimerId, 100, nullptr);
 
     MSG msg;
-    while (GetMessage(&msg, nullptr, 0, 0)) {
+    while (GetMessage(&msg, nullptr, 0, 0) > 0) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
+    hwnd_ = nullptr;
 }
 
-void FloatingUI::UpdateMYaw(float) {
-    if (isVisible_) {
-        InvalidateRect(hwnd_, nullptr, TRUE);
-    }
+void FloatingUI::Close() {
+    HWND h = hwnd_.load();
+    if (h) PostMessage(h, WM_CLOSE, 0, 0);
 }
 
-LRESULT CALLBACK FloatingUI::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    FloatingUI* pThis = reinterpret_cast<FloatingUI*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
-
+LRESULT CALLBACK FloatingUI::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    FloatingUI* self = nullptr;
     if (msg == WM_NCCREATE) {
-        CREATESTRUCT* create = reinterpret_cast<CREATESTRUCT*>(lParam);
-        pThis = reinterpret_cast<FloatingUI*>(create->lpCreateParams);
-        SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(pThis));
+        self = static_cast<FloatingUI*>(reinterpret_cast<CREATESTRUCT*>(lp)->lpCreateParams);
+        SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
     }
-
-    if (!pThis) {
-        return DefWindowProc(hwnd, msg, wParam, lParam);
+    else {
+        self = reinterpret_cast<FloatingUI*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
     }
+    if (self) return self->handle(hwnd, msg, wp, lp);
+    return DefWindowProc(hwnd, msg, wp, lp);
+}
 
+LRESULT FloatingUI::handle(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+    case WM_MOUSEACTIVATE:
+        return MA_NOACTIVATE; // never steal focus from the game
+
+    case WM_LBUTTONDOWN: {
+        SetCapture(hwnd);
+        dragging_ = true;
+        moved_ = false;
+        GetCursorPos(&dragCursorStart_);
+        RECT r; GetWindowRect(hwnd, &r);
+        dragWindowStart_ = { r.left, r.top };
+        return 0;
+    }
+    case WM_MOUSEMOVE:
+        if (dragging_) {
+            POINT p; GetCursorPos(&p);
+            int nx = dragWindowStart_.x + (p.x - dragCursorStart_.x);
+            int ny = dragWindowStart_.y + (p.y - dragCursorStart_.y);
+            SetWindowPos(hwnd, HWND_TOPMOST, nx, ny, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+            moved_ = true;
+        }
+        return 0;
+
+    case WM_LBUTTONUP:
+        if (dragging_) {
+            ReleaseCapture();
+            dragging_ = false;
+            if (moved_) {
+                RECT r; GetWindowRect(hwnd, &r);
+                settings_.update([&](SimulationSettings& s) { s.windowX = r.left; s.windowY = r.top; });
+                settings_.save();
+            }
+        }
+        return 0;
+
+    case WM_MOUSEWHEEL: {
+        int steps = GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA;
+        if (steps != 0) {
+            settings_.update([&](SimulationSettings& s) {
+                s.cl_yawspeed = clampf(s.cl_yawspeed + steps * 10.0f, 10.0f, 500.0f);
+            });
+            settings_.save();
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    }
+
+    case WM_TIMER: {
+        float ys = settings_.get().cl_yawspeed;
+        int p = paused_ ? 1 : 0;
+        if (ys != drawnYawSpeed_ || p != drawnPaused_) InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
+
+    case WM_ERASEBKGND:
+        return 1;
+
     case WM_PAINT: {
         PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hwnd, &ps);
+        HDC dc = BeginPaint(hwnd, &ps);
+        RECT rc; GetClientRect(hwnd, &rc);
 
-        RECT rect;
-        GetClientRect(hwnd, &rect);
+        float ys = settings_.get().cl_yawspeed;
+        bool paused = paused_;
+        drawnYawSpeed_ = ys;
+        drawnPaused_ = paused ? 1 : 0;
 
-        // Manually clear the background
-        HBRUSH bgBrush = CreateSolidBrush(RGB(255, 255, 255));
-        FillRect(hdc, &rect, bgBrush);
-        DeleteObject(bgBrush);
+        HBRUSH bg = CreateSolidBrush(paused ? RGB(70, 55, 10) : RGB(25, 30, 35));
+        FillRect(dc, &rc, bg);
+        DeleteObject(bg);
 
-        SelectObject(hdc, pThis->hFont_);
-        SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, RGB(0, 0, 0));
+        SetBkMode(dc, TRANSPARENT);
+        HFONT font = CreateFontA(16, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                 DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+        HGDIOBJ old = SelectObject(dc, font);
 
-        std::wstringstream wss;
-        wss << L"cl_yawspeed: " << std::fixed << std::setprecision(1) << pThis->settings_.get().cl_yawspeed;
-        DrawText(hdc, wss.str().c_str(), -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        char l1[64];
+        std::snprintf(l1, sizeof(l1), "yawspeed  %g", ys);
+        RECT r1 = rc; r1.bottom = rc.top + kHeight / 2; r1.top += 4;
+        SetTextColor(dc, RGB(235, 235, 235));
+        DrawTextA(dc, l1, -1, &r1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
+        RECT r2 = rc; r2.top = rc.top + kHeight / 2 - 2;
+        SetTextColor(dc, paused ? RGB(255, 200, 60) : RGB(110, 220, 120));
+        DrawTextA(dc, paused ? "PAUSED" : "ACTIVE", -1, &r2, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        SelectObject(dc, old);
+        DeleteObject(font);
         EndPaint(hwnd, &ps);
         return 0;
     }
 
-    case WM_LBUTTONDOWN: {
-        pThis->isScrollActive_ = true;
-        pThis->isDragging_ = true;
-        GetCursorPos(&pThis->dragStart_);
-        SetCapture(hwnd);
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
         return 0;
-    }
-    case WM_LBUTTONUP: {
-        pThis->isScrollActive_ = false;
-        pThis->isDragging_ = false;
-        ReleaseCapture();
-
-        RECT rect;
-        GetWindowRect(hwnd, &rect);
-        SimulationSettings settings = pThis->settings_.get();
-        settings.windowX = rect.left;
-        settings.windowY = rect.top;
-        pThis->settings_.update([&](SimulationSettings& s) {
-            s.windowX = settings.windowX;
-            s.windowY = settings.windowY;
-            });
-        pThis->settings_.save();
-        return 0;
-    }
-    case WM_MOUSEMOVE: {
-        if (pThis->isDragging_) {
-            POINT current;
-            GetCursorPos(&current);
-            int dx = current.x - pThis->dragStart_.x;
-            int dy = current.y - pThis->dragStart_.y;
-            RECT rect;
-            GetWindowRect(hwnd, &rect);
-            MoveWindow(hwnd, rect.left + dx, rect.top + dy, rect.right - rect.left, rect.bottom - rect.top, TRUE);
-            pThis->dragStart_ = current;
-        }
-        return 0;
-    }
-    case WM_MOUSEWHEEL: {
-        if (pThis->isScrollActive_) {
-            short delta = GET_WHEEL_DELTA_WPARAM(wParam);
-            float yawSpeedDelta = (delta > 0 ? 10.0f : -10.0f);
-            SimulationSettings settings = pThis->settings_.get();
-            float newSpeed = settings.cl_yawspeed + yawSpeedDelta;
-
-            // Clamp between 10 and 500
-            if (newSpeed < 10.0f) newSpeed = 10.0f;
-            else if (newSpeed > 500.0f) newSpeed = 500.0f;
-
-            pThis->settings_.update([&](SimulationSettings& s) {
-                s.cl_yawspeed = newSpeed;
-                });
-            pThis->settings_.save();
-            pThis->UpdateMYaw(newSpeed); // Just triggers repaint
-        }
-        return 0;
-    }
-    case WM_HOTKEY: {
-        if (wParam == 1) {
-            pThis->ToggleVisibility();
-        }
-        return 0;
-    }
-    case WM_DESTROY: {
+    case WM_DESTROY:
+        KillTimer(hwnd, kTimerId);
         PostQuitMessage(0);
         return 0;
     }
-    default:
-        return DefWindowProc(hwnd, msg, wParam, lParam);
-    }
+    return DefWindowProc(hwnd, msg, wp, lp);
 }

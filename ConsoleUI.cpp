@@ -1,232 +1,234 @@
 #include "ConsoleUI.h"
-#include <conio.h>
-#include <iostream>
-#include <iomanip>
-#include <sstream>
 #include "Utils.h"
+#include "Banner.h"
+#include <windows.h>
+#include <cstdio>
+#include <cstdlib>
+#include <vector>
+#include <algorithm>
+#include <iostream>
+#include <sstream>
+#include <thread>
+#include <chrono>
 
-ConsoleUI::ConsoleUI() : hConsole_(GetStdHandle(STD_OUTPUT_HANDLE)) {
-    SMALL_RECT windowSize = { 0, 0, 119, 39 };
-    SetConsoleWindowInfo(hConsole_, TRUE, &windowSize);
+namespace {
+const char* ansi(ConsoleColor c) {
+    switch (c) {
+    case ConsoleColor::Green:  return "\x1b[92m";
+    case ConsoleColor::Red:    return "\x1b[91m";
+    case ConsoleColor::Yellow: return "\x1b[93m";
+    case ConsoleColor::Cyan:   return "\x1b[96m";
+    case ConsoleColor::Gray:   return "\x1b[90m";
+    default:                   return "\x1b[97m";
+    }
+}
+const char* RESET = "\x1b[0m";
+const char* CLR = "\x1b[K"; // clear to end of line
 
-    COORD bufferSize = { 120, 40 };
-    SetConsoleScreenBufferSize(hConsole_, bufferSize);
+// Visible width of a UTF-8 string, ignoring ANSI colour sequences
+size_t visLen(const std::string& str) {
+    size_t n = 0; bool esc = false;
+    for (unsigned char c : str) {
+        if (esc) { if (c == 'm') esc = false; continue; }
+        if (c == 0x1b) { esc = true; continue; }
+        if ((c & 0xC0) != 0x80) ++n;
+    }
+    return n;
+}
+std::string padTo(const std::string& str, size_t w) {
+    size_t v = visLen(str);
+    return v < w ? str + std::string(w - v, ' ') : str;
+}
+std::string rep(const char* unit, int n) {
+    std::string r; for (int i = 0; i < n; ++i) r += unit; return r;
+}
 
-    CONSOLE_SCREEN_BUFFER_INFO csbi;
-    GetConsoleScreenBufferInfo(hConsole_, &csbi);
-    originalAttributes_ = csbi.wAttributes;
+std::string fg256(int n) { return "\x1b[38;5;" + std::to_string(n) + "m"; }
 
-    GetConsoleMode(hConsole_, &originalConsoleMode_);
-    SetConsoleMode(hConsole_, originalConsoleMode_ & ~ENABLE_QUICK_EDIT_MODE);
+std::string fmt(float v) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%g", v);
+    return buf;
+}
+}
 
-    // Hide cursor initially
-    GetConsoleCursorInfo(hConsole_, &originalCursorInfo_);
-    CONSOLE_CURSOR_INFO cursorInfo = originalCursorInfo_;
-    cursorInfo.bVisible = FALSE; // Ensure cursor is invisible
-    cursorInfo.dwSize = 100; // Size doesn't matter since it's invisible
-    SetConsoleCursorInfo(hConsole_, &cursorInfo);
-    SetConsoleTextAttribute(hConsole_, FOREGROUND_RED | FOREGROUND_INTENSITY);
-
-    settingsStartPos_ = { 0, 9 };
-    statusPos_ = { 0, static_cast<SHORT>(settingsStartPos_.Y + 9) };
-    debugPos_ = { 0, static_cast<SHORT>(statusPos_.Y + 3) };
-    inputDebugPos_ = { 0, static_cast<SHORT>(debugPos_.Y + 2) };
-    errorPos_ = { 0, static_cast<SHORT>(inputDebugPos_.Y + 2) };
-
-    debugMsgActive_ = false;
-    errorMsgActive_ = false;
+ConsoleUI::ConsoleUI() {
+    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD mode = 0;
+    if (GetConsoleMode(h, &mode)) SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    SetConsoleOutputCP(CP_UTF8);                       // block characters
+    SetConsoleTitleA("Shiz-Turnbinds");
+    std::cout << "\x1b[?1049h\x1b[2J\x1b[3J\x1b[H\x1b[?25l" << std::flush; // alt screen, clear, hide cursor
 }
 
 ConsoleUI::~ConsoleUI() {
-    SetConsoleMode(hConsole_, originalConsoleMode_);
-    SetConsoleCursorInfo(hConsole_, &originalCursorInfo_);
-    SetConsoleTextAttribute(hConsole_, originalAttributes_);
+    std::cout << "\x1b[?25h" << RESET << "\x1b[?1049l" << std::flush; // show cursor, leave alt screen
 }
 
-void ConsoleUI::setTextColor(ConsoleColor color) {
-    SetConsoleTextAttribute(hConsole_, static_cast<WORD>(color));
+void ConsoleUI::printColored(const std::string&, ConsoleColor) {
+    // Banner is part of redraw() so it stays in place; kept for API parity.
 }
 
-void ConsoleUI::printColored(const std::string& text, ConsoleColor color) {
-    setTextColor(color);
-    std::cout << text;
-    setTextColor(ConsoleColor::Default);
+void ConsoleUI::displayInstructions() { redraw(); }
 
-    // Ensure cursor remains hidden after printing
-    CONSOLE_CURSOR_INFO cursorInfo;
-    GetConsoleCursorInfo(hConsole_, &cursorInfo);
-    cursorInfo.bVisible = FALSE;
-    SetConsoleCursorInfo(hConsole_, &cursorInfo);
+void ConsoleUI::updateSettingsDisplay(int selected, const SimulationSettings& s) {
+    { std::lock_guard<std::mutex> l(mutex_); selected_ = selected; settings_ = s; }
+    redraw();
+}
+void ConsoleUI::updateStatusDisplay(bool running, bool paused) {
+    { std::lock_guard<std::mutex> l(mutex_); running_ = running; paused_ = paused; }
+    redraw();
+}
+void ConsoleUI::updateCS2StatusDisplay(bool a) {
+    { std::lock_guard<std::mutex> l(mutex_); cs2Active_ = a; }
+    redraw();
+}
+void ConsoleUI::updateDebugDisplay(const std::string& m) {
+    { std::lock_guard<std::mutex> l(mutex_); debug_ = m; }
+    redraw();
+}
+void ConsoleUI::updateInputDebugDisplay(const std::string& m) {
+    { std::lock_guard<std::mutex> l(mutex_); input_ = m; }
+    redraw();
 }
 
-void ConsoleUI::writeAt(COORD pos, const std::string& text, bool clearLine) {
-    SetConsoleCursorPosition(hConsole_, pos);
-    if (clearLine) {
-        CONSOLE_SCREEN_BUFFER_INFO csbi;
-        GetConsoleScreenBufferInfo(hConsole_, &csbi);
-        DWORD written;
-        FillConsoleOutputCharacter(hConsole_, ' ', csbi.dwSize.X - pos.X, pos, &written);
-        SetConsoleCursorPosition(hConsole_, pos);
-    }
-    std::cout << text << std::flush;
+void ConsoleUI::redraw() {
+    std::lock_guard<std::mutex> l(mutex_);
+    const SimulationSettings& s = settings_;
 
-    // Ensure cursor remains hidden after writing
-    CONSOLE_CURSOR_INFO cursorInfo;
-    GetConsoleCursorInfo(hConsole_, &cursorInfo);
-    cursorInfo.bVisible = FALSE;
-    SetConsoleCursorInfo(hConsole_, &cursorInfo);
-}
-
-void ConsoleUI::updateSettingsDisplay(int selectedOption, const SimulationSettings& settings) {
-const char* options[] = { "auto-activate", "update rate (hz)", "m_yaw", "cl_yawspeed", "+left key", "+right key", "modifier key", "modifier" };
-    for (int i = 0; i < 8; ++i) {
-        COORD pos = { 0, static_cast<SHORT>(settingsStartPos_.Y + i) };
-        std::string prefix = (i == selectedOption) ? "> " : "  ";
-        std::string value;
-
-        if (i == 0) { // auto-activate
-            std::string text = prefix + options[i] + ": ";
-            writeAt(pos, text, true);
-            SetConsoleCursorPosition(hConsole_, { static_cast<SHORT>(text.length()), pos.Y });
-            setTextColor(settings.autoActivate ? ConsoleColor::Green : ConsoleColor::Red);
-            std::cout << (settings.autoActivate ? "On" : "Off");
-            setTextColor(ConsoleColor::Default);
-            std::cout << std::flush;
-            continue;
-        }
-        else if (i == 1) { // update rate (hz)
-            std::ostringstream oss;
-            oss << static_cast<int>(settings.updateRate) << " Hz";
-            value = oss.str();
-        }
-        else if (i == 2) { // m_yaw
-            std::ostringstream oss;
-            oss << std::fixed << std::setprecision(3) << settings.m_yaw;
-            value = oss.str();
-        }
-        else if (i == 3) { // cl_yawspeed
-            std::ostringstream oss;
-            oss << std::fixed << std::setprecision(1) << settings.cl_yawspeed;
-            value = oss.str();
-        }
-        else if (i == 4) { // +left key
-            value = keyToString(settings.leftKey);
-        }
-        else if (i == 5) { // +right key
-            value = keyToString(settings.rightKey);
-        }
-        else if (i == 6) { // modifier key
-            value = keyToString(settings.modifierKey);
-        }
-        else if (i == 7) { // modifier
-            std::ostringstream oss;
-            oss << std::fixed << std::setprecision(2) << settings.modifier;
-            value = oss.str();
-        }
-
-        if (i == selectedOption) {
-            setTextColor(ConsoleColor::Red);
-            writeAt(pos, prefix + options[i] + ": " + value, true);
-            setTextColor(ConsoleColor::Default);
-        }
-        else {
-            writeAt(pos, prefix + options[i] + ": " + value, true);
-        }
-    }
-}
-
-void ConsoleUI::updateStatusDisplay(bool running) {
-    writeAt(statusPos_, "Status:", true);
-    COORD valuePos = { 8, statusPos_.Y };
-    writeAt(valuePos, "", true);
-    SetConsoleCursorPosition(hConsole_, valuePos);
-    setTextColor(running ? ConsoleColor::Green : ConsoleColor::Red);
-    std::cout << (running ? "Running" : "Stopped");
-    setTextColor(ConsoleColor::Default);
-    std::cout << std::flush;
-}
-
-void ConsoleUI::updateCS2StatusDisplay(bool detected) {
-    COORD cs2StatusPos = { 0, static_cast<SHORT>(statusPos_.Y + 1) };
-    writeAt(cs2StatusPos, "Window Found:", true);
-    COORD valuePos = { 14, cs2StatusPos.Y };
-    writeAt(valuePos, "", true);
-    SetConsoleCursorPosition(hConsole_, valuePos);
-    setTextColor(detected ? ConsoleColor::Green : ConsoleColor::Red);
-    std::cout << (detected ? "True" : "False");
-    setTextColor(ConsoleColor::Default);
-    std::cout << std::flush;
-}
-
-void ConsoleUI::updateDebugDisplay(const std::string& debugMsg, bool temporary) {
-    std::string truncatedMsg = "Debug: " + debugMsg;
-    if (truncatedMsg.length() > 30) {
-        truncatedMsg = truncatedMsg.substr(0, 27) + "...";
-    }
-    lastDebugMsg_ = truncatedMsg;
-    writeAt(debugPos_, lastDebugMsg_, true);
-    if (temporary) {
-        debugMsgActive_ = true;
-        debugMsgTime_ = std::chrono::steady_clock::now();
-    }
-}
-
-void ConsoleUI::updateInputDebugDisplay(const std::string& inputMsg) {
-    lastInputMsg_ = "Input: " + inputMsg;
-    writeAt(inputDebugPos_, lastInputMsg_, true);
-}
-
-void ConsoleUI::updateErrorDisplay(const std::string& errorMsg, bool temporary) {
-    lastErrorMsg_ = "MSG: " + errorMsg;
-    writeAt(errorPos_, lastErrorMsg_, true);
-    if (temporary) {
-        errorMsgActive_ = true;
-        errorMsgTime_ = std::chrono::steady_clock::now();
-    }
-}
-
-void ConsoleUI::clearTemporaryMessages() {
-    auto now = std::chrono::steady_clock::now();
-    if (debugMsgActive_ && std::chrono::duration_cast<std::chrono::milliseconds>(now - debugMsgTime_).count() >= 2000) {
-        writeAt(debugPos_, "Debug: ", true);
-        debugMsgActive_ = false;
-    }
-    if (errorMsgActive_ && std::chrono::duration_cast<std::chrono::milliseconds>(now - errorMsgTime_).count() >= 2000) {
-        writeAt(errorPos_, "Error: ", true);
-        errorMsgActive_ = false;
-    }
-}
-
-void ConsoleUI::drawSeparatorLine(COORD pos) {
+    // ---- measure the window so we never print more than fits (scrolling = banner spam) ----
+    int cols = 120, rows = 30;
     CONSOLE_SCREEN_BUFFER_INFO csbi;
-    GetConsoleScreenBufferInfo(hConsole_, &csbi);
-    std::string separator(csbi.dwSize.X - 1, '-');
-    writeAt(pos, separator, false);
-}
+    if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi)) {
+        cols = csbi.srWindow.Right - csbi.srWindow.Left + 1;
+        rows = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
+    }
 
-void ConsoleUI::displayInstructions() {
-    printColored("ARROWS: Move | ", ConsoleColor::White);
-    printColored("ENTER: Select Bind | ", ConsoleColor::White);
-    printColored("Q: Quit\n", ConsoleColor::White);
-    printColored("CONFIG:\n", ConsoleColor::Blue);
+    const std::string G = ansi(ConsoleColor::Gray), C = ansi(ConsoleColor::Cyan), R = RESET;
+    const std::string kUrlShiz = "https://discord.com/invite/V9KhKrJ3Pf";
+    const std::string kUrlLow  = "https://flowstatecs.com/discord";
+    static const int kShizGrad[6] = { 51, 45, 39, 33, 27, 21 };      // cyan -> blue
+    static const int kLowGrad[6]  = { 213, 207, 201, 165, 129, 93 }; // pink -> purple
+    const size_t kArtW = 47;
+
+    // ---- everything below the banner ----
+    struct Row { const char* label; std::string value; };
+    const Row rowsTbl[] = {
+        { "Auto activate", s.autoActivate ? "On" : "Off" },
+        { "Update rate",   fmt(s.updateRate) },
+        { "m_yaw",         fmt(s.m_yaw) },
+        { "cl_yawspeed",   fmt(s.cl_yawspeed) },
+        { "Left key",      keyToString(s.leftKey) },
+        { "Right key",     keyToString(s.rightKey) },
+        { "Modifier key",  keyToString(s.modifierKey) },
+        { "Modifier",      fmt(s.modifier) },
+        { "Pause key",     keyToString(s.pauseKey) },
+    };
+
+    std::vector<std::string> rest;
+    rest.push_back(" Up/Down select | Left/Right adjust | Enter toggle/rebind | Q quit");
+    rest.push_back("");
+    for (int i = 0; i < 9; ++i) {
+        bool sel = (i == selected_);
+        char line[96];
+        std::snprintf(line, sizeof(line), "%-14s %s", rowsTbl[i].label, rowsTbl[i].value.c_str());
+        rest.push_back(std::string(sel ? ansi(ConsoleColor::Cyan) : ansi(ConsoleColor::White))
+                       + (sel ? " > " : "   ") + line + R);
+    }
+    rest.push_back("");
+    if (paused_)
+        rest.push_back(std::string(ansi(ConsoleColor::Yellow)) + " Status : PAUSED (press " + keyToString(s.pauseKey) + " to resume)" + R);
+    else if (running_)
+        rest.push_back(std::string(ansi(ConsoleColor::Green)) + " Status : RUNNING" + R);
+    else
+        rest.push_back(std::string(ansi(ConsoleColor::Red)) + " Status : STOPPED" + R);
+    rest.push_back(std::string(cs2Active_ ? ansi(ConsoleColor::Green) : ansi(ConsoleColor::Gray))
+                   + " CS2    : " + (cs2Active_ ? "in focus" : "not in focus") + R);
+    rest.push_back(" Input  : " + input_);
+    if (prompting_)
+        rest.push_back(std::string(ansi(ConsoleColor::Yellow)) + " Press the new key / mouse button (Esc to cancel)..." + R);
+    else
+        rest.push_back(G + " " + debug_ + R);
+
+    // ---- banner variants, widest/tallest first ----
+    // 1) stacked: Made by / SHIZ / <> / Maintained / LOW
+    std::vector<std::string> stacked;
+    stacked.push_back(G + "  Made by" + R);
+    for (int i = 0; i < 6; ++i) stacked.push_back(fg256(kShizGrad[i]) + "  " + kShizArt[i] + R);
+    stacked.push_back(G + "  discord - " + C + kUrlShiz + R);
+    stacked.push_back(G + "  " + rep("\xE2\x94\x80", 22) + " " + R + "<>" + G + " " + rep("\xE2\x94\x80", 22) + R);
+    stacked.push_back(G + "  Maintained" + R);
+    for (int i = 0; i < 6; ++i) stacked.push_back(fg256(kLowGrad[i]) + "  " + kLowArt[i] + R);
+    stacked.push_back(G + "  discord - " + C + kUrlLow + R);
+    stacked.push_back("");
+
+    // 2) side by side: shorter, needs a wide window
+    std::vector<std::string> side;
+    side.push_back(padTo(G + "  Made by" + R, 2 + kArtW + 6) + G + "Maintained" + R);
+    for (int i = 0; i < 6; ++i) {
+        std::string left  = fg256(kShizGrad[i]) + "  " + kShizArt[i] + R;
+        std::string mid   = (i == 2) ? "  <>  " : "      ";
+        side.push_back(padTo(left, 2 + kArtW) + mid + fg256(kLowGrad[i]) + kLowArt[i] + R);
+    }
+    side.push_back(padTo(G + "  discord - " + C + kUrlShiz + R, 2 + kArtW + 6) + G + "discord - " + C + kUrlLow + R);
+    side.push_back("");
+
+    // 3) plain text fallback for small windows
+    std::vector<std::string> compact;
+    compact.push_back(G + "  Made by Shiz  <>  Maintained by Low" + R);
+    compact.push_back(G + "  " + C + kUrlShiz + R);
+    compact.push_back(G + "  " + C + kUrlLow + R);
+    compact.push_back("");
+
+    auto fits = [&](const std::vector<std::string>& b, int needCols) {
+        return cols >= needCols && static_cast<int>(b.size() + rest.size()) <= rows - 1;
+    };
+    const std::vector<std::string>* banner = &compact;
+    if (fits(stacked, 52))                 banner = &stacked;
+    else if (fits(side, 2 + (int)kArtW + 6 + (int)kArtW + 2)) banner = &side;
+
+    std::vector<std::string> lines = *banner;
+    lines.insert(lines.end(), rest.begin(), rest.end());
+    if (static_cast<int>(lines.size()) > rows - 1) lines.resize(std::max(1, rows - 1)); // never scroll
+
+    std::string out = "\x1b[H";
+    for (size_t i = 0; i < lines.size(); ++i) {
+        out += lines[i];
+        out += CLR;
+        if (i + 1 < lines.size()) out += "\n";
+    }
+    out += "\x1b[J"; // clear anything left below
+    std::fwrite(out.data(), 1, out.size(), stdout);
+    std::fflush(stdout);
 }
 
 int ConsoleUI::detectKeyPress() {
-    COORD tempPos = { 0, errorPos_.Y };
-    updateErrorDisplay("Press a key or mouse button to assign...", true);
-    Sleep(250);
-    while (_kbhit()) _getch();
-    while (true) {
-        for (int vk = 0x01; vk <= 0xFE; ++vk) {
-            if (vk == VK_RETURN) continue;
-            if (GetAsyncKeyState(vk) & 0x8000) {
-                while (GetAsyncKeyState(vk) & 0x8000) Sleep(10);
-                updateErrorDisplay("Detected: " + keyToString(vk), true);
-                Sleep(1000);
-                updateErrorDisplay("", false);
-                return vk;
-            }
+    { std::lock_guard<std::mutex> l(mutex_); prompting_ = true; }
+    redraw();
+
+    // Wait for Enter and the mouse buttons to be released so the rebind
+    // doesn't instantly capture whatever was held when it started
+    while ((GetAsyncKeyState(VK_RETURN) & 0x8000) ||
+           (GetAsyncKeyState(VK_LBUTTON) & 0x8000) ||
+           (GetAsyncKeyState(VK_RBUTTON) & 0x8000))
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    int result = 0;
+    bool done = false;
+    while (!done) {
+        if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) { result = 0; done = true; break; }
+        for (int vk = 1; vk < 255; ++vk) {
+            if (vk == VK_RETURN || vk == VK_ESCAPE) continue;
+            if (GetAsyncKeyState(vk) & 0x8000) { result = vk; done = true; break; }
         }
-        Sleep(10);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
+    // Wait for release so the key press doesn't leak into the game/menu
+    while (result && (GetAsyncKeyState(result) & 0x8000)) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    while (GetAsyncKeyState(VK_ESCAPE) & 0x8000) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    FlushConsoleInputBuffer(GetStdHandle(STD_INPUT_HANDLE));
+
+    { std::lock_guard<std::mutex> l(mutex_); prompting_ = false; }
+    redraw();
+    return result;
 }

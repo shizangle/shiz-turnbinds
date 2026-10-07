@@ -1,29 +1,31 @@
 #pragma once
-#include <windows.h>
-#include <string>
 #include "Settings.h"
+#include <atomic>
+#include <windows.h>
 
-// FloatingUI.h
+// Small always-on-top, non-activating overlay:
+//  - mouse wheel over it: cl_yawspeed +/- 10
+//  - left-drag: move it (position is saved)
+//  - shows PAUSED / ACTIVE state
 class FloatingUI {
 public:
-    FloatingUI(SettingsManager& settings);
-    ~FloatingUI();
-    void Show(); // <- this now creates and shows the window
-    void UpdateMYaw(float newYaw);
-    void ToggleVisibility();
-    HWND getHwnd() const { return hwnd_; } // optional
-    void RegisterHotkey();
+    FloatingUI(SettingsManager& settings, const std::atomic<bool>& paused);
+    void Show();   // blocks: creates the window and runs its message loop
+    void Close();  // thread-safe
 
 private:
-    static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
-    void RegisterWindowClass();
-    void CreateFloatingWindow(); // now called inside Show()
+    static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
+    LRESULT handle(HWND, UINT, WPARAM, LPARAM);
 
-    HWND hwnd_;
     SettingsManager& settings_;
-    HFONT hFont_;
-    bool isDragging_;
-    POINT dragStart_;
-    bool isScrollActive_;
-    bool isVisible_;
+    const std::atomic<bool>& paused_;
+    std::atomic<HWND> hwnd_{ nullptr };
+
+    bool dragging_ = false;
+    bool moved_ = false;
+    POINT dragCursorStart_{};
+    POINT dragWindowStart_{};
+
+    float drawnYawSpeed_ = -1.0f;
+    int drawnPaused_ = -1;
 };

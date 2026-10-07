@@ -1,12 +1,13 @@
 {
+    "m_yaw": 0.022,
+    "cl_yawspeed": 210.0,
+    "leftKey": 6,
+    "rightKey": 5,
+    "updateRate": 1000.0,
     "autoActivate": true,
-    "cl_yawspeed": 120.0,
-    "leftKey": 65,
-    "m_yaw": 0.02199999988079071,
-    "modifier": 0.8000000715255737,
-    "modifierKey": 32,
-    "rightKey": 68,
-    "updateRate": 2000.0,
-    "windowX": 1685,
-    "windowY": 664
+    "modifier": 0.5,
+    "modifierKey": 18,
+    "pauseKey": 119,
+    "windowX": -1,
+    "windowY": -1
 }

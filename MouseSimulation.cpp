@@ -4,8 +4,13 @@
 #include <chrono>
 #include <cmath>
 #include <sstream>
+#include <thread>
 
-void MouseSimulator::run(std::atomic<bool>& running, const SettingsManager& settings, std::function<void(const std::string&)> debugCallback) {
+void MouseSimulator::run(std::atomic<bool>& running,
+                         const std::atomic<bool>& paused,
+                         const std::atomic<bool>& shouldRun,
+                         const SettingsManager& settings,
+                         std::function<void(const std::string&)> debugCallback) {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
     SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
 
@@ -14,39 +19,32 @@ void MouseSimulator::run(std::atomic<bool>& running, const SettingsManager& sett
     long long lastTime = performance_counter();
     bool lastLeft = false, lastRight = false;
 
-    while (true) {
-        if (!running) {
+    while (shouldRun) {
+        // Inactive or paused: idle and drop all motion state
+        if (!running || paused) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             currentSpeed = 0.0;
             remaining = 0.0;
+            lastTime = performance_counter();
             debugCallback("");
             continue;
         }
-
         if (!isCS2WindowActive()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            lastTime = performance_counter();
             continue;
         }
 
         auto cfg = settings.get();
-        bool leftDown = (GetAsyncKeyState(cfg.leftKey) & 0x8000) != 0;
-        bool rightDown = (GetAsyncKeyState(cfg.rightKey) & 0x8000) != 0;
+        bool leftDown     = (GetAsyncKeyState(cfg.leftKey) & 0x8000) != 0;
+        bool rightDown    = (GetAsyncKeyState(cfg.rightKey) & 0x8000) != 0;
         bool modifierDown = (GetAsyncKeyState(cfg.modifierKey) & 0x8000) != 0;
+
         int direction = 0;
         std::string keyStatus;
-
-        if (leftDown && !rightDown) {
-            direction = -1;
-            keyStatus = keyToString(cfg.leftKey);
-        }
-        else if (rightDown && !leftDown) {
-            direction = 1;
-            keyStatus = keyToString(cfg.rightKey);
-        }
-        else if (leftDown && rightDown) {
-            direction = 0;
-            keyStatus = "Both keys pressed";
-        }
+        if (leftDown && !rightDown)      { direction = -1; keyStatus = keyToString(cfg.leftKey); }
+        else if (rightDown && !leftDown) { direction = 1;  keyStatus = keyToString(cfg.rightKey); }
+        else if (leftDown && rightDown)  { direction = 0;  keyStatus = "Both keys pressed"; }
 
         long long currentTime = performance_counter();
         double deltaTime = static_cast<double>(currentTime - lastTime) / performance_counter_frequency();
@@ -56,12 +54,10 @@ void MouseSimulator::run(std::atomic<bool>& running, const SettingsManager& sett
             if (direction != 0) {
                 double effectiveYawSpeed = cfg.cl_yawspeed * (modifierDown ? cfg.modifier : 1.0);
                 double targetSpeed = direction * effectiveYawSpeed * (1.0 / cfg.m_yaw);
-                currentSpeed += (targetSpeed - currentSpeed) * 0.15;
+                currentSpeed += (targetSpeed - currentSpeed) * 0.15; // smooth ramp
 
                 double moveAmount = currentSpeed * deltaTime;
-                if (std::abs(moveAmount) > 100.0) {
-                    moveAmount = std::copysign(100.0, moveAmount);
-                }
+                if (std::abs(moveAmount) > 100.0) moveAmount = std::copysign(100.0, moveAmount);
 
                 remaining += moveAmount;
                 int intMove = static_cast<int>(std::round(remaining));

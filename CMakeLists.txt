@@ -1,35 +1,29 @@
-cmake_minimum_required(VERSION 3.10)
-project(Turnbinds LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.20)
+project(Shiz-Turnbinds LANGUAGES CXX)
 
-# Set the vcpkg toolchain file (optional if vcpkg integrate install was run)
-set(CMAKE_TOOLCHAIN_FILE "C:/Users/Jacob/vcpkg/scripts/buildsystems/vcpkg.cmake" CACHE STRING "Vcpkg toolchain file")
-
-# Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Define the executable
-add_executable(turnbinds
+# Static CRT so the exe needs no extra installs (MSVC)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+include(FetchContent)
+FetchContent_Declare(json
+    URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz)
+FetchContent_MakeAvailable(json)
+
+add_executable(Shiz-Turnbinds
     main.cpp
     ConsoleUI.cpp
-    Settings.cpp
+    FloatingUI.cpp
     MouseSimulation.cpp
     CS2Monitor.cpp
-    NetworkUtils.cpp
-    Utils.cpp
-)
+    Settings.cpp
+    Utils.cpp)
 
-# Include directories (headers are in the same directory)
-target_include_directories(turnbinds PRIVATE .)
-
-# Find and link nlohmann_json
-find_package(nlohmann_json CONFIG REQUIRED)
-target_link_libraries(turnbinds PRIVATE nlohmann_json::nlohmann_json)
-
-# Link Windows libraries
-target_link_libraries(turnbinds PRIVATE winmm iphlpapi ws2_32)
-
-# Windows-specific definitions
-if (WIN32)
-    target_compile_definitions(turnbinds PRIVATE NOMINMAX _WIN32_WINNT=0x0600)
+if(MSVC)
+    target_compile_options(Shiz-Turnbinds PRIVATE /utf-8)
 endif()
+
+target_compile_definitions(Shiz-Turnbinds PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_link_libraries(Shiz-Turnbinds PRIVATE nlohmann_json::nlohmann_json winmm user32 gdi32)
